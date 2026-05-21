@@ -1,0 +1,34 @@
+# Gradle / Android build output
+.gradle/
+.gradle-home/
+.gradle-tmp/
+build/
+app/build/
+app/.cxx/
+
+# Local Android SDK / IDE machine state
+local.properties
+.idea/
+.run/
+*.iml
+
+# Generated release output
+output/
+
+# Native temporary files
+*.o
+*.so
+*.dylib
+*.dll
+*.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Agent/session-local metadata
+.git/
+.agents/
+.codex/
