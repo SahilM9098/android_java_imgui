@@ -1,10 +1,12 @@
 package com.sahilm9098.arkmodmenu;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.text.InputType;
@@ -13,6 +15,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -38,6 +41,7 @@ final class ImeInputController {
     private static Activity activity;
     private static WindowManager windowManager;
     private static View panel;
+    private static Dialog editorDialog;
     private static EditText editor;
     private static int activeId;
     private static int mode;
@@ -88,34 +92,49 @@ final class ImeInputController {
 
         mode = nextMode;
         activeId = nextActiveId;
-        editor = createEditor(nextMode, initialText);
+        // A Dialog supplies the DecorView that hosts native floating text action modes.
+        // A panel added directly to WindowManager has no action-mode host.
+        editorDialog = new Dialog(activity, android.R.style.Theme_Material_Light_Dialog_NoActionBar);
+        editor = createEditor(editorDialog.getContext(), nextMode, initialText);
         panel = createPanel(nextMode, editor);
 
         try {
-            windowManager.addView(panel, createLayoutParams(nextMode));
+            editorDialog.setContentView(panel);
+            editorDialog.setCanceledOnTouchOutside(false);
+            editorDialog.setOnCancelListener(dialog -> cancel());
+            Window window = editorDialog.getWindow();
+            if (window == null) {
+                throw new IllegalStateException("IME dialog has no window");
+            }
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setAttributes(createLayoutParams(nextMode));
+            editorDialog.show();
         } catch (RuntimeException exception) {
             Log.w(TAG, "failed to show IME panel", exception);
-            panel = null;
-            editor = null;
+            dismissLocal(false);
             return;
         }
 
+        final EditText shownEditor = editor;
         editor.requestFocus();
         editor.post(new Runnable() {
             @Override
             public void run() {
+                if (editor != shownEditor || !shownEditor.isAttachedToWindow()) {
+                    return;
+                }
                 InputMethodManager inputManager = (InputMethodManager)
-                        activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        shownEditor.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (inputManager != null) {
-                    inputManager.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT);
+                    inputManager.showSoftInput(shownEditor, InputMethodManager.SHOW_IMPLICIT);
                 }
             }
         });
     }
 
-    private static EditText createEditor(int editorMode, String initialText) {
+    private static EditText createEditor(Context context, int editorMode, String initialText) {
         final boolean multiline = editorMode == MODE_MULTI_LINE;
-        EditText editText = new EditText(activity);
+        EditText editText = new EditText(context);
         editText.setText(initialText);
         editText.setTextColor(COLOR_TEXT);
         editText.setHintTextColor(0xff868c96);
@@ -125,6 +144,7 @@ final class ImeInputController {
         editText.setGravity(multiline ? Gravity.TOP | Gravity.LEFT : Gravity.CENTER_VERTICAL);
         editText.setMinHeight(multiline ? dp(160) : dp(52));
         editText.setInputType(createInputType(multiline));
+        editText.setLongClickable(true);
         editText.setImeOptions(multiline
                 ? EditorInfo.IME_FLAG_NO_EXTRACT_UI
                 : EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
@@ -137,18 +157,6 @@ final class ImeInputController {
                 if (!multiline && (actionId == EditorInfo.IME_ACTION_DONE
                         || isEnterUp(event))) {
                     commit();
-                    return true;
-                }
-                return false;
-            }
-        });
-
-        editText.setOnKeyListener(new View.OnKeyListener() {
-            @Override
-            public boolean onKey(View v, int keyCode, KeyEvent event) {
-                if (keyCode == KeyEvent.KEYCODE_BACK
-                        && event.getAction() == KeyEvent.ACTION_UP) {
-                    cancel();
                     return true;
                 }
                 return false;
@@ -300,13 +308,14 @@ final class ImeInputController {
             }
         }
 
-        if (panel != null && windowManager != null) {
+        if (editorDialog != null) {
             try {
-                windowManager.removeViewImmediate(panel);
+                editorDialog.dismiss();
             } catch (RuntimeException ignored) {
             }
         }
 
+        editorDialog = null;
         panel = null;
         editor = null;
         activeId = 0;

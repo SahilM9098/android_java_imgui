@@ -11,7 +11,10 @@ constexpr const char *kGlesClassName = "com.sahilm9098.arkmodmenu.GLES3JNIView";
 
 void NativeInitImgui(JNIEnv *env, jclass clazz, jobject surface, jfloat density) {
   (void)clazz;
-  ImGuiRenderer::Get().Initialize(env, surface, density);
+  // true: content drags scroll; only the title bar moves the window.
+  // false: use scrollbars and allow normal ImGui window dragging from empty content.
+  constexpr bool enableGestureScroll = true;
+  ImGuiRenderer::Get().Initialize(env, surface, density, enableGestureScroll);
 }
 
 void NativeUpdateSize(JNIEnv *env, jclass clazz, jint width, jint height) {

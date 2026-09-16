@@ -3,9 +3,9 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("menu")
 
-add_library(dobby STATIC IMPORTED)
-set_target_properties(dobby PROPERTIES
-        IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/Dobby/libs/arm64-v8a/libdobby.a)
+add_library(shadowhook STATIC IMPORTED)
+set_target_properties(shadowhook PROPERTIES
+        IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/Utilities/shadowhook/libs/arm64-v8a/libshadowhook.a)
 
 set(IMGUI_SOURCES
         imgui/imgui.cpp
@@ -16,7 +16,7 @@ set(IMGUI_SOURCES
         imgui/backends/imgui_impl_opengl3.cpp)
 
 set(MENU_SOURCES
-        common/Log.cpp
+        Utilities/common/Log.cpp
         jni/GlesJniBridge.cpp
         jni/JniClassLoader.cpp
         jni/JniString.cpp
@@ -32,21 +32,22 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/Utilities
         ${CMAKE_CURRENT_SOURCE_DIR}/jni
         ${CMAKE_CURRENT_SOURCE_DIR}/payload
         ${CMAKE_CURRENT_SOURCE_DIR}/render
         ${CMAKE_CURRENT_SOURCE_DIR}/imgui
         ${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends
-        ${CMAKE_CURRENT_SOURCE_DIR}/Dobby
-        ${CMAKE_CURRENT_SOURCE_DIR}/Font)
+        ${CMAKE_CURRENT_SOURCE_DIR}/Utilities/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/Utilities/Font
+        ${CMAKE_CURRENT_SOURCE_DIR}/Utilities/shadowhook/include)
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
         CXX_VISIBILITY_PRESET hidden
         C_VISIBILITY_PRESET hidden)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
-        dobby
+        shadowhook
         EGL
         GLESv3
         android

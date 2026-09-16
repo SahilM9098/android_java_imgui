@@ -1,6 +1,7 @@
 #include "ImGuiRenderer.h"
 
 #include <android/native_window_jni.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -48,6 +49,40 @@ std::string TruncateToInputCapacity(ImGuiInputTextState *state, const std::strin
   return std::string(begin, safeEnd);
 }
 
+ImGuiWindow *FindTouchWindow(ImGuiContext *context, float x, float y) {
+  if (context == nullptr) {
+    return nullptr;
+  }
+
+  const ImVec2 position(x, y);
+  for (int index = context->Windows.Size - 1; index >= 0; --index) {
+    ImGuiWindow *window = context->Windows[index];
+    if (window == nullptr || (!window->Active && !window->WasActive) ||
+        window->Hidden || window->Collapsed ||
+        (window->Flags & ImGuiWindowFlags_NoMouseInputs) != 0) {
+      continue;
+    }
+    if (window->OuterRectClipped.Contains(position)) {
+      return window;
+    }
+  }
+  return nullptr;
+}
+
+ImGuiWindow *FindTouchWindowById(ImGuiContext *context, std::uint32_t id) {
+  if (context == nullptr || id == 0) {
+    return nullptr;
+  }
+
+  for (int index = 0; index < context->Windows.Size; ++index) {
+    ImGuiWindow *window = context->Windows[index];
+    if (window != nullptr && window->ID == id) {
+      return window;
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 ImGuiRenderer &ImGuiRenderer::Get() {
@@ -55,7 +90,8 @@ ImGuiRenderer &ImGuiRenderer::Get() {
   return renderer;
 }
 
-void ImGuiRenderer::Initialize(JNIEnv *env, jobject surface, float density) {
+void ImGuiRenderer::Initialize(JNIEnv *env, jobject surface, float density,
+                               bool enableGestureScroll) {
   MutexLock lock(&imguiMutex_);
 
   if (initialized_) {
@@ -67,6 +103,22 @@ void ImGuiRenderer::Initialize(JNIEnv *env, jobject surface, float density) {
     ImGui::CreateContext();
     initialized_ = true;
   }
+
+  gestureScrollEnabled_ = enableGestureScroll;
+  ImGui::GetIO().ConfigWindowsMoveFromTitleBarOnly = enableGestureScroll;
+  // Initialization may also run when Android recreates the rendering surface.
+  // Discard any unfinished gesture before applying the new configuration.
+  touchActive_ = false;
+  touchCanScroll_ = false;
+  touchScrolling_ = false;
+  suppressTouchClick_ = false;
+  touchAxisLocked_ = false;
+  pendingTouchScrollX_ = 0.0f;
+  pendingTouchScrollY_ = 0.0f;
+  touchWindowId_ = 0;
+  mouseDown_ = false;
+  ImGui::GetIO().AddMouseButtonEvent(0, false);
+  ImGui::GetIO().MouseDown[0] = false;
 
   window_ = ANativeWindow_fromSurface(env, surface);
   ImGui_ImplAndroid_Init(window_);
@@ -99,11 +151,20 @@ void ImGuiRenderer::RenderFrame() {
   ImGui_ImplAndroid_NewFrame();
   ImGui::NewFrame();
   ApplyPendingKeyboardAction();
+  SuppressTouchClick();
 
   if (menuVisible_) {
     RenderMenuWindow();
   }
+  ApplyTouchScroll();
   FinishPendingKeyboardAction();
+
+  if (!touchActive_) {
+    suppressTouchClick_ = false;
+    touchCanScroll_ = false;
+    touchAxisLocked_ = false;
+    touchWindowId_ = 0;
+  }
 
   UpdateWindowRectCache();
   UpdateKeyboardState();
@@ -130,6 +191,19 @@ void ImGuiRenderer::Shutdown() {
   screenWidth_ = 0;
   screenHeight_ = 0;
   mouseDown_ = false;
+  touchActive_ = false;
+  touchCanScroll_ = false;
+  touchScrolling_ = false;
+  suppressTouchClick_ = false;
+  touchAxisLocked_ = false;
+  touchScrollAxis_ = 1;
+  touchStartX_ = 0.0f;
+  touchStartY_ = 0.0f;
+  touchLastX_ = 0.0f;
+  touchLastY_ = 0.0f;
+  pendingTouchScrollX_ = 0.0f;
+  pendingTouchScrollY_ = 0.0f;
+  touchWindowId_ = 0;
   nativeTouchLogCount_ = 0;
   ClearWindowRectCache();
   ClearKeyboardState();
@@ -287,12 +361,146 @@ void ImGuiRenderer::ApplyTouch(bool down, float x, float y) {
   ImGuiIO &io = ImGui::GetIO();
   io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
   io.AddMousePosEvent(x, y);
-  io.MousePos = ImVec2(x, y);
-  if (mouseDown_ != down) {
-    io.AddMouseButtonEvent(0, down);
-    mouseDown_ = down;
+
+  if (down && !touchActive_) {
+    touchActive_ = true;
+    touchCanScroll_ = false;
+    touchScrolling_ = false;
+    suppressTouchClick_ = false;
+    touchAxisLocked_ = false;
+    touchScrollAxis_ = 1;
+    touchStartX_ = x;
+    touchStartY_ = y;
+    touchLastX_ = x;
+    touchLastY_ = y;
+    pendingTouchScrollX_ = 0.0f;
+    pendingTouchScrollY_ = 0.0f;
+
+    ImGuiContext *context = ImGui::GetCurrentContext();
+    ImGuiWindow *window = FindTouchWindow(context, x, y);
+    if (window != nullptr) {
+      touchWindowId_ = static_cast<std::uint32_t>(window->ID);
+      // Keep the title bar and scrollbar as normal ImGui interactions.
+      touchCanScroll_ = gestureScrollEnabled_ && window->InnerRect.Contains(ImVec2(x, y));
+    } else {
+      touchWindowId_ = 0;
+    }
+  } else if (touchActive_) {
+    // Include the final UP position: fast swipes may have no intermediate MOVE.
+    const float deltaX = x - touchLastX_;
+    const float deltaY = y - touchLastY_;
+    const float fromStartX = x - touchStartX_;
+    const float fromStartY = y - touchStartY_;
+
+    if (!touchScrolling_ && touchCanScroll_) {
+      const float threshold = ImMax(8.0f, io.MouseDragThreshold);
+      if (fromStartX * fromStartX + fromStartY * fromStartY >=
+          threshold * threshold) {
+        touchScrolling_ = true;
+        touchAxisLocked_ = true;
+        touchScrollAxis_ = std::fabs(fromStartY) >= std::fabs(fromStartX) ? 1 : 0;
+        suppressTouchClick_ = true;
+      }
+    }
+
+    if (touchScrolling_) {
+      // Direct manipulation: moving the finger down moves the content down,
+      // which means the ImGui scroll offset moves up.
+      if (touchScrollAxis_ == 1) {
+        pendingTouchScrollY_ -= deltaY;
+      } else {
+        pendingTouchScrollX_ -= deltaX;
+      }
+    }
+
+    touchLastX_ = x;
+    touchLastY_ = y;
+    if (!down && touchCanScroll_ && !touchScrolling_) {
+      // Content presses are deferred until release so InputText never sees the
+      // initial DOWN of a scroll gesture. ImGui's input queue delivers this tap
+      // as a press followed by a release on successive frames.
+      io.AddMouseButtonEvent(0, true);
+      io.AddMouseButtonEvent(0, false);
+    }
   }
-  io.MouseDown[0] = down;
+
+  if (!down) {
+    if (touchScrolling_) {
+      suppressTouchClick_ = true;
+    }
+    touchActive_ = false;
+    touchScrolling_ = false;
+    // Keep the selected axis until the pending final movement is applied by
+    // the render thread. The UP event can arrive before the next frame.
+    touchLastX_ = x;
+    touchLastY_ = y;
+  }
+
+  // Title bars, scrollbars, and gesture-disabled input keep normal press/drag behavior.
+  const bool forwardDown = down && !touchCanScroll_;
+  if (mouseDown_ != forwardDown) {
+    io.AddMouseButtonEvent(0, forwardDown);
+    mouseDown_ = forwardDown;
+  }
+}
+
+void ImGuiRenderer::SuppressTouchClick() {
+  if (!gestureScrollEnabled_ || (!touchScrolling_ && !suppressTouchClick_)) {
+    return;
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+  ImGui::ClearActiveID();
+  io.MouseDown[0] = false;
+  io.MouseClicked[0] = false;
+  io.MouseDoubleClicked[0] = false;
+  io.MouseClickedCount[0] = 0;
+  io.MouseReleased[0] = false;
+  io.MouseDownDuration[0] = -1.0f;
+  io.MouseDownDurationPrev[0] = -1.0f;
+}
+
+void ImGuiRenderer::ApplyTouchScroll() {
+  if (!gestureScrollEnabled_ ||
+      (pendingTouchScrollX_ == 0.0f && pendingTouchScrollY_ == 0.0f)) {
+    return;
+  }
+
+  ImGuiContext *context = ImGui::GetCurrentContext();
+  ImGuiWindow *window = FindTouchWindowById(context, touchWindowId_);
+  if (window == nullptr && context != nullptr) {
+    window = context->HoveredWindow;
+  }
+  if (window == nullptr) {
+    pendingTouchScrollX_ = 0.0f;
+    pendingTouchScrollY_ = 0.0f;
+    return;
+  }
+
+  const int axis = touchAxisLocked_ ? touchScrollAxis_ : 1;
+  while (window->ParentWindow != nullptr && window->ScrollMax[axis] <= 0.0f) {
+    window = window->ParentWindow;
+  }
+
+  if ((window->Flags & ImGuiWindowFlags_NoMouseInputs) != 0 ||
+      (window->Flags & ImGuiWindowFlags_NoScrollWithMouse) != 0 ||
+      window->ScrollMax[axis] <= 0.0f) {
+    pendingTouchScrollX_ = 0.0f;
+    pendingTouchScrollY_ = 0.0f;
+    return;
+  }
+
+  if (axis == 1) {
+    ImGui::SetScrollY(window,
+                      ImClamp(window->Scroll.y + pendingTouchScrollY_,
+                              0.0f, window->ScrollMax.y));
+    pendingTouchScrollY_ = 0.0f;
+  } else {
+    ImGui::SetScrollX(window,
+                      ImClamp(window->Scroll.x + pendingTouchScrollX_,
+                              0.0f, window->ScrollMax.x));
+    pendingTouchScrollX_ = 0.0f;
+  }
 }
 
 void ImGuiRenderer::LoadFonts() {
